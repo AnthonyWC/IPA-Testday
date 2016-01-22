@@ -1,0 +1,8 @@
+[Unit]
+Description=ipa-testday-radiusd socket
+
+[Socket]
+ListenDatagram=127.0.0.1:1812
+
+[Install]
+WantedBy=ipa-otpd.socket

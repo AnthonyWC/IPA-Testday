@@ -1,0 +1,134 @@
+#!/usr/bin/env python
+#
+# FreeIPA 2FA Test Day RADIUS Enablement
+#
+# Authors: Nathaniel McCallum <npmccallum@redhat.com>
+#
+# Copyright (C) 2013  Nathaniel McCallum, Red Hat
+# see file 'COPYING' for use and warranty information
+#
+# This program is free software you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+import uuid
+import ldap
+import ldap.sasl
+import ldap.modlist
+import os
+import sys
+import ConfigParser
+import pprint
+
+if len(sys.argv) not in (2, 4, 5):
+    sys.stderr.write("Usage: %s <uid> [<host:port> <secret>] [<radius_username>]\n" % os.path.basename(sys.argv[0]))
+    sys.exit(1)
+if len(sys.argv) == 2:
+    sys.argv = sys.argv + ['127.0.0.1:1812', 'testday']
+
+# Parse the config
+cfg = ConfigParser.RawConfigParser()
+cfg.read('/etc/ipa/default.conf')
+
+# Open LDAP
+l = ldap.initialize(cfg.get('global', 'ldap_uri'))
+l.protocol_version = ldap.VERSION3
+l.sasl_interactive_bind_s("", ldap.sasl.external())
+
+# Find the search base
+rslt = l.search_s("", ldap.SCOPE_BASE, attrlist=['namingContexts', 'defaultNamingContext'])[0][1]
+base = rslt.get('defaultNamingContext', rslt.get('namingContexts'))[0]
+
+# Find the RADIUS config
+try:
+    rdn, rattrs = l.search_s(base, ldap.SCOPE_SUBTREE,
+                             "(&" + "(objectClass=ipatokenRadiusConfiguration)" +
+                                    "(ipatokenRadiusServer=%s)" % sys.argv[2] +
+                                    "(ipatokenRadiusSecret=%s)" % sys.argv[3] + ")",
+                             attrlist=[])[0]
+    print "Found RADIUS Config: %s" % rdn
+except:
+    # Add the config
+    rattrs = {}
+    rattrs['cn'] = str(uuid.uuid4())
+    rattrs['objectClass'] = ['ipatokenRadiusConfiguration']
+    rattrs['ipatokenRadiusServer'] = sys.argv[2]
+    rattrs['ipatokenRadiusSecret'] = sys.argv[3]
+    rdn = 'cn=%s,cn=otp,%s' % (rattrs['cn'], base)
+    l.add_s(rdn, ldap.modlist.addModlist(rattrs))
+    print "Added RADIUS Config: %s" % rdn
+
+# Find the user
+try:
+    dn, attrs = l.search_s(base, ldap.SCOPE_SUBTREE,
+                           "(&(objectClass=person)(objectClass=posixAccount)(uid=%s))" % sys.argv[1],
+                           attrlist=['objectClass', 'ipaUserAuthType',
+                                     'ipatokenRadiusUserName', 'ipatokenRadiusConfigLink'])[0]
+except:
+    sys.stderr.write("User '%s' not found!\n" % sys.argv[1])
+    sys.exit(1)
+
+# Add auth type object class to user if necessary
+if not 'ipaUserAuthTypeClass' in attrs.get('objectClass', []):
+    old = {'objectClass': attrs.get('objectClass', []), 'ipaUserAuthType': []}
+    new = {'objectClass': attrs.get('objectClass', []) + ['ipaUserAuthTypeClass'],
+           'ipaUserAuthType': ['radius']}
+    l.modify_s(dn, ldap.modlist.modifyModlist(old, new))
+    attrs['objectClass'] = new['objectClass']
+    attrs['ipaUserAuthType'] = new['ipaUserAuthType']
+
+# Add radius to the auth types if necessary
+elif not 'radius' in attrs.get('ipaUserAuthType', []):
+    old = {'ipaUserAuthType': attrs.get('ipaUserAuthType', [])}
+    new = {'ipaUserAuthType': attrs.get('ipaUserAuthType', []) + ['radius']}
+    l.modify_s(dn, ldap.modlist.modifyModlist(old, new))
+    attrs['ipaUserAuthType'] = new['ipaUserAuthType']
+
+# Add radius user object class to user if necessary
+if not 'ipatokenRadiusProxyUser' in attrs.get('objectClass', []):
+    old = {'objectClass': attrs.get('objectClass', [])}
+    new = {'objectClass': old['objectClass'] + ['ipatokenRadiusProxyUser'],
+           'ipatokenRadiusConfigLink': [rdn]}
+    l.modify_s(dn, ldap.modlist.modifyModlist(old, new))
+    attrs['objectClass'] = new['objectClass']
+    attrs['ipatokenRadiusConfigLink'] = new['ipatokenRadiusConfigLink']
+
+# Update config link if necessary
+elif attrs.get('ipatokenRadiusConfigLink', None) != rdn:
+    old = {'ipatokenRadiusConfigLink': attrs.get('ipatokenRadiusConfigLink', None)}
+    new = {'ipatokenRadiusConfigLink': rdn}
+    l.modify_s(dn, ldap.modlist.modifyModlist(old, new))
+    attrs['ipatokenRadiusConfigLink'] = new['ipatokenRadiusConfigLink']
+
+# Add username override if specified
+if len(sys.argv) == 5 and attrs.get('ipatokenRadiusUserName', []) != [sys.argv[4]]:
+    old = {'ipatokenRadiusUserName': attrs.get('ipatokenRadiusUserName', [])}
+    new = {'ipatokenRadiusUserName': [sys.argv[4]]}
+    l.modify_s(dn, ldap.modlist.modifyModlist(old, new))
+    attrs['ipatokenRadiusUserName'] = new['ipatokenRadiusUserName']
+elif len(sys.argv) == 4 and attrs.get('ipatokenRadiusUserName', []):
+    old = {'ipatokenRadiusUserName': attrs.get('ipatokenRadiusUserName')}
+    new = {}
+    l.modify_s(dn, ldap.modlist.modifyModlist(old, new))
+    del attrs['ipatokenRadiusUserName']
+
+# Cleanup
+l.unbind_s()
+
+# Print debug output
+print
+print "RADIUS Config:"
+pprint.pprint(rattrs)
+print
+print "User Config:"
+pprint.pprint(attrs)
+print

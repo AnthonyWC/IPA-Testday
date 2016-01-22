@@ -1,0 +1,106 @@
+#!/usr/bin/env python
+#
+# FreeIPA 2FA Test Day OTP Enablement
+#
+# Authors: Nathaniel McCallum <npmccallum@redhat.com>
+#
+# Copyright (C) 2013  Nathaniel McCallum, Red Hat
+# see file 'COPYING' for use and warranty information
+#
+# This program is free software you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+import uuid
+import qrcode
+import ldap
+import ldap.sasl
+import ldap.modlist
+import os
+import sys
+import random
+import base64
+import ConfigParser
+import urllib
+
+if len(sys.argv) < 2:
+  sys.stderr.write("Usage: %s <uid>\n" % os.path.basename(sys.argv[0]))
+  sys.exit(1)
+
+# Parse the config
+cfg = ConfigParser.RawConfigParser()
+cfg.read('/etc/ipa/default.conf')
+
+# Open LDAP
+l = ldap.initialize(cfg.get('global', 'ldap_uri'))
+l.protocol_version = ldap.VERSION3
+l.sasl_interactive_bind_s("", ldap.sasl.external())
+
+# Find the search base
+rslt = l.search_s("", ldap.SCOPE_BASE, attrlist=['namingContexts', 'defaultNamingContext'])[0][1]
+base = rslt.get('defaultNamingContext', rslt.get('namingContexts'))[0]
+
+# Find the user
+try:
+  dn, attrs = l.search_s(base, ldap.SCOPE_SUBTREE,
+                         "(&(objectClass=person)(objectClass=posixAccount)(uid=%s))" % sys.argv[1],
+                         attrlist=['objectClass', 'ipaUserAuthType', 'krbPrincipalName'])[0]
+  princ = attrs['krbPrincipalName'][0]
+except:
+  sys.stderr.write("User '%s' not found!\n" % sys.argv[1])
+  sys.exit(1)
+
+# Add object class to user if necessary
+if not 'ipaUserAuthTypeClass' in attrs.get('objectClass', []):
+  old = {'objectClass': attrs.get('objectClass', [])}
+  new = {'objectClass': attrs.get('objectClass', []) + ['ipaUserAuthTypeClass']}
+  l.modify_s(dn, ldap.modlist.modifyModlist(old, new))
+
+# Add otp to the auth types if necessary
+if not 'otp' in attrs.get('ipaUserAuthType', []):
+  old = {'ipaUserAuthType': attrs.get('ipaUserAuthType', [])}
+  new = {'ipaUserAuthType': attrs.get('ipaUserAuthType', []) + ['otp']}
+  l.modify_s(dn, ldap.modlist.modifyModlist(old, new))
+
+# Generate random key
+key = ""
+for i in range(32):
+  key += chr(random.randrange(0, 255))
+
+# Set token attributes
+attrs = {}
+attrs['objectClass'] = ['top', 'ipaToken', 'ipatokenTOTP']
+attrs['ipatokenUniqueID'] = str(uuid.uuid4())
+attrs['ipatokenOwner'] = dn
+attrs['ipatokenOTPkey'] = key
+attrs['ipatokenOTPalgorithm'] = "sha1"
+attrs['ipatokenOTPdigits'] = '6'       # Ignored by Google Auth
+attrs['ipatokenTOTPclockOffset'] = '0' # Ignored by Google Auth
+attrs['ipatokenTOTPtimeStep'] = '30'   # Ignored by Google Auth
+
+# Add the token
+l.add_s('ipatokenUniqueID=%s,cn=otp,%s' % (attrs['ipatokenUniqueID'], base),
+        ldap.modlist.addModlist(attrs))
+
+# Print the QR Code
+uri  = "otpauth://totp/%s?" % princ
+uri += urllib.urlencode({'secret': base64.b32encode(key)})
+print ""
+print "Scan this with Google Authenticator:"
+print ""
+qr = qrcode.QRCode()
+qr.add_data(uri)
+qr.make()
+qr.print_tty()
+
+# Cleanup
+l.unbind_s()

@@ -1,0 +1,62 @@
+#!/bin/bash
+URL=http://npmccallum.fedorapeople.org/freeipa-otp
+SYSD=/lib/systemd/system
+UL=/usr/local
+
+if [ $UID -ne 0 ]; then
+  echo "Must run as root!"
+  exit 1
+fi
+
+if [ "$1" != install ] && [ "$1" != uninstall ]; then
+  echo "Usage: testday [install|uninstall]"
+  exit 1
+fi
+
+if [ "$1" == "install" ]; then
+  # REQUIRED: Install FreeIPA
+  if [ "$2" == cd ]; then
+    systemctl enable ipa-otpd.socket
+  else
+    yum update
+    yum install freeipa-server freeipa-client sssd python-qrcode python-pyrad bind bind-dyndb-ldap
+    systemctl start ipa-otpd.socket
+  fi
+
+  # REQUIRED: Install testing environment
+  cd $UL/sbin
+  wget -q $URL/ipa-testday-otp
+  wget -q $URL/ipa-testday-radius
+  chown root:root ipa-testday-otp ipa-testday-radius
+  chmod 755 ipa-testday-otp ipa-testday-radius
+
+  # OPTIONAL: simulated RADIUS daemon
+  cd $UL/libexec
+  wget -q $URL/ipa-testday-radiusd
+  chown root:root ipa-testday-radiusd
+  chmod 755 ipa-testday-radiusd
+
+  # OPTIONAL: simulated RADIUS daemon startup scripts
+  cd $SYSD
+  wget -q $URL/ipa-testday-radiusd.service
+  wget -q $URL/ipa-testday-radiusd.socket
+  chown root:root ipa-testday-radiusd.service ipa-testday-radiusd.socket
+  chmod 644 ipa-testday-radiusd.service ipa-testday-radiusd.socket
+  if [ "$2" == cd ]; then
+    systemctl enable ipa-testday-radiusd.socket
+  else
+    systemctl --system daemon-reload
+    systemctl start ipa-testday-radiusd.socket
+  fi
+elif [ "$1" == "uninstall" ]; then
+  echo
+  echo "NOTE: This does not remove the installed RPMs!"
+  echo
+
+  systemctl stop ipa-testday-radiusd.socket
+  rm -f $UL/sbin/ipa-testday-otp $UL/sbin/ipa-testday-radius
+  rm -f $UL/libexec/ipa-testday-radiusd
+  rm -f $SYSD/ipa-testday-radiusd.socket $SYSD/ipa-testday-radiusd.service
+  systemctl --system daemon-reload
+fi
+

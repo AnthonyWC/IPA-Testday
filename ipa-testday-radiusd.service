@@ -1,0 +1,8 @@
+[Unit]
+Description=ipa-testday-radiusd service
+
+[Service]
+ExecStart=/usr/local/libexec/ipa-testday-radiusd
+StandardInput=null
+StandardOutput=syslog
+StandardError=syslog
